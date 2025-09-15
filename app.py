@@ -2,7 +2,7 @@ import os, json, threading, time, re, io
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import requests
-from flask import Flask, request, redirect, jsonify
+from flask import Flask, request, jsonify
 import dateparser
 
 from google.oauth2.credentials import Credentials
@@ -26,11 +26,11 @@ STORE_PATH = "store.json"
 LOCK = threading.Lock()
 OAUTH_STATE = {}  # state -> {chat_id, code_verifier, ts}
 
-    def load_store():  
-    if not os.path.exists(STORE_PATH):
-    return {"users": {}}
-    with open(STORE_PATH, "r", encoding="utf-8") as f:
-    return json.load(f)
+def load_store():
+if not os.path.exists(STORE_PATH):
+return {"users": {}}
+with open(STORE_PATH, "r", encoding="utf-8") as f:
+return json.load(f)
 
 def save_store(data):
 with LOCK:
@@ -84,13 +84,15 @@ return build("calendar", "v3", credentials=creds)
 
 def parse_event_text(text, tz_str):
 tz = ZoneInfo(tz_str)
+# длительность
 dur_minutes = None
 m = re.search(r"\bна\s+(\d+)\s*(минут|мин|m)\b", text, re.IGNORECASE)
-h = re.search(r"\bна\s+(\д+)\s*(час|ч|h)\b", text, re.IGNORECASE)
+h = re.search(r"\bна\s+(\d+)\s*(час|ч|h)\b", text, re.IGNORECASE)
 if m:
 dur_minutes = int(m.group(1))
 elif h:
 dur_minutes = int(h.group(1)) * 60
+# до HH:MM
 until = re.search(r"\bдо\s+(\d{1,2}[:.]\d{2})", text, re.IGNORECASE)
 settings = {
 "PREFER_DATES_FROM": "future",
@@ -111,6 +113,7 @@ else:
 if not dur_minutes:
 dur_minutes = 60
 end = start + timedelta(minutes=dur_minutes)
+# summary
 summary = text
 summary = re.sub(r"\b(сегодня|завтра|послезавтра)\b", "", summary, flags=re.I)
 summary = re.sub(r"\bв\s+\d{1,2}[:.]\d{2}\b", "", summary, flags=re.I)
@@ -180,6 +183,7 @@ send_message(chat_id, f"Откройте ссылку для привязки Go
 return
 if text.startswith("/add"):
 text = text[len("/add"):].strip()
+# общий кейс: добавление события
 store = load_store()
 user = get_user(store, chat_id)
 tz = user.get("tz", DEFAULT_TZ)
@@ -306,7 +310,7 @@ changed = False
 for ev in events:
 start = ev.get("start", {})
 if "dateTime" not in start:
-continue
+continue  # all-day
 start_dt = dateparser.parse(start["dateTime"])
 if not start_dt:
 continue
@@ -337,5 +341,5 @@ time.sleep(30)
 if name == "main":
 threading.Thread(target=reminder_loop, daemon=True).start()
 port = int(os.environ.get("PORT", "10000"))
-
 app.run(host="0.0.0.0", port=port)
+
