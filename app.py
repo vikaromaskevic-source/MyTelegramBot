@@ -10,7 +10,7 @@ from googleapiclient.discovery import build
 from google.auth.transport.requests import Request as GRequest
 from google_auth_oauthlib.flow import Flow
 
-app = Flask(name)
+app = Flask(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ALLOWED_CHAT_ID = os.environ.get("ALLOWED_CHAT_ID")  # string
@@ -27,321 +27,324 @@ LOCK = threading.Lock()
 OAUTH_STATE = {}  # state -> {chat_id, code_verifier, ts}
 
 def load_store():
-if not os.path.exists(STORE_PATH):
-return {"users": {}}
-with open(STORE_PATH, "r", encoding="utf-8") as f:
-return json.load(f)
+    if not os.path.exists(STORE_PATH):
+        return {"users": {}}
+    with open(STORE_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 def save_store(data):
-with LOCK:
-with open(STORE_PATH, "w", encoding="utf-8") as f:
-json.dump(data, f, ensure_ascii=False, indent=2)
+    with LOCK:
+        with open(STORE_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
 def get_user(store, chat_id):
-chat_id = str(chat_id)
-if chat_id not in store["users"]:
-store["users"][chat_id] = {"tz": DEFAULT_TZ, "creds": None, "reminders": {}}
-return store["users"][chat_id]
+    chat_id = str(chat_id)
+    if chat_id not in store["users"]:
+        store["users"][chat_id] = {"tz": DEFAULT_TZ, "creds": None, "reminders": {}}
+    return store["users"][chat_id]
 
 def send_message(chat_id, text):
-url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-try:
-requests.post(url, json={"chat_id": chat_id, "text": text})
-except Exception as e:
-print("send_message error:", e)
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        requests.post(url, json={"chat_id": chat_id, "text": text})
+    except Exception as e:
+        print("send_message error:", e)
 
 def set_webhook():
-if not BASE_URL:
-return
-url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
-data = {
-"url": f"{BASE_URL}/webhook",
-"drop_pending_updates": True,
-"allowed_updates": ["message"]
-}
-try:
-r = requests.post(url, json=data, timeout=10)
-print("setWebhook:", r.status_code, r.text)
-except Exception as e:
-print("setWebhook error:", e)
+    if not BASE_URL:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
+    data = {
+        "url": f"{BASE_URL}/webhook",
+        "drop_pending_updates": True,
+        "allowed_updates": ["message"]
+    }
+    try:
+        r = requests.post(url, json=data, timeout=10)
+        print("setWebhook:", r.status_code, r.text)
+    except Exception as e:
+        print("setWebhook error:", e)
 
 def build_service_for_chat(chat_id):
-store = load_store()
-user = get_user(store, chat_id)
-creds_json = user.get("creds")
-if not creds_json:
-return None
-creds = Credentials.from_authorized_user_info(creds_json, SCOPES)
-if creds and creds.expired and creds.refresh_token:
-try:
-creds.refresh(GRequest())
-user["creds"] = json.loads(creds.to_json())
-save_store(store)
-except Exception as e:
-print("Google refresh error:", e)
-return None
-return build("calendar", "v3", credentials=creds)
+    store = load_store()
+    user = get_user(store, chat_id)
+    creds_json = user.get("creds")
+    if not creds_json:
+        return None
+    creds = Credentials.from_authorized_user_info(creds_json, SCOPES)
+    if creds and creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(GRequest())
+            user["creds"] = json.loads(creds.to_json())
+            save_store(store)
+        except Exception as e:
+            print("Google refresh error:", e)
+            return None
+    return build("calendar", "v3", credentials=creds)
 
 def parse_event_text(text, tz_str):
-tz = ZoneInfo(tz_str)
-# длительность
-dur_minutes = None
-m = re.search(r"\bна\s+(\d+)\s*(минут|мин|m)\b", text, re.IGNORECASE)
-h = re.search(r"\bна\s+(\d+)\s*(час|ч|h)\b", text, re.IGNORECASE)
-if m:
-dur_minutes = int(m.group(1))
-elif h:
-dur_minutes = int(h.group(1)) * 60
-# до HH:MM
-until = re.search(r"\bдо\s+(\d{1,2}[:.]\d{2})", text, re.IGNORECASE)
-settings = {
-"PREFER_DATES_FROM": "future",
-"RETURN_AS_TIMEZONE_AWARE": True,
-"TIMEZONE": tz_str,
-"RELATIVE_BASE": datetime.now(tz)
-}
-dt = dateparser.parse(text, languages=["ru"], settings=settings)
-if not dt:
-return None, None, None, "Не понял дату/время. Пример: 'завтра в 14:30 встреча на 30 мин'."
-start = dt.astimezone(tz)
-if until:
-hh, mm = re.split("[:.]", until.group(1))
-end = start.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
-if end <= start:
-end += timedelta(days=1)
-else:
-if not dur_minutes:
-dur_minutes = 60
-end = start + timedelta(minutes=dur_minutes)
-# summary
-summary = text
-summary = re.sub(r"\b(сегодня|завтра|послезавтра)\b", "", summary, flags=re.I)
-summary = re.sub(r"\bв\s+\d{1,2}[:.]\d{2}\b", "", summary, flags=re.I)
-summary = re.sub(r"\bна\s+\d+\s*(минут|мин|m|час|ч|h)\b", "", summary, flags=re.I)
-summary = re.sub(r"\bдо\s+\d{1,2}[:.]\d{2}\b", "", summary, flags=re.I)
-summary = summary.strip(" ,.-")
-if not summary:
-summary = "Событие"
-return summary, start, end, None
+    tz = ZoneInfo(tz_str)
+    # длительность
+    dur_minutes = None
+    m = re.search(r"\bна\s+(\d+)\s*(минут|мин|m)\b", text, re.IGNORECASE)
+    h = re.search(r"\bна\s+(\d+)\s*(час|ч|h)\b", text, re.IGNORECASE)
+    if m:
+        dur_minutes = int(m.group(1))
+    elif h:
+        dur_minutes = int(h.group(1)) * 60
+    # до HH:MM
+    until = re.search(r"\bдо\s+(\d{1,2}[:.]\d{2})", text, re.IGNORECASE)
+    settings = {
+        "PREFER_DATES_FROM": "future",
+        "RETURN_AS_TIMEZONE_AWARE": True,
+        "TIMEZONE": tz_str,
+        "RELATIVE_BASE": datetime.now(tz)
+    }
+    dt = dateparser.parse(text, languages=["ru"], settings=settings)
+    if not dt:
+        return None, None, None, "Не понял дату/время. Пример: 'завтра в 14:30 встреча на 30 мин'."
+    start = dt.astimezone(tz)
+    if until:
+        hh, mm = re.split("[:.]", until.group(1))
+        end = start.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+        if end <= start:
+            end += timedelta(days=1)
+    else:
+        if not dur_minutes:
+            dur_minutes = 60
+        end = start + timedelta(minutes=dur_minutes)
+    # summary
+    summary = text
+    summary = re.sub(r"\b(сегодня|завтра|послезавтра)\b", "", summary, flags=re.I)
+    summary = re.sub(r"\bв\s+\d{1,2}[:.]\d{2}\b", "", summary, flags=re.I)
+    summary = re.sub(r"\bна\s+\d+\s*(минут|мин|m|час|ч|h)\b", "", summary, flags=re.I)
+    summary = re.sub(r"\bдо\s+\d{1,2}[:.]\d{2}\b", "", summary, flags=re.I)
+    summary = summary.strip(" ,.-")
+    if not summary:
+        summary = "Событие"
+    return summary, start, end, None
 
 def add_event(service, summary, start, end):
-body = {
-"summary": summary,
-"start": {"dateTime": start.isoformat()},
-"end": {"dateTime": end.isoformat()},
-"reminders": {
-"useDefault": False,
-"overrides": [{"method": "popup", "minutes": 60}, {"method": "popup", "minutes": 10}]
-}
-}
-ev = service.events().insert(calendarId="primary", body=body).execute()
-return ev.get("id"), ev.get("htmlLink")
+    body = {
+        "summary": summary,
+        "start": {"dateTime": start.isoformat()},
+        "end": {"dateTime": end.isoformat()},
+        "reminders": {
+            "useDefault": False,
+            "overrides": [{"method": "popup", "minutes": 60}, {"method": "popup", "minutes": 10}]
+        }
+    }
+    ev = service.events().insert(calendarId="primary", body=body).execute()
+    return ev.get("id"), ev.get("htmlLink")
 
 def format_time(dt):
-return dt.strftime("%d.%m %H:%M")
+    return dt.strftime("%d.%m %H:%M")
 
 def handle_text(chat_id, text):
-if text.startswith("/start"):
-send_message(chat_id, "Привет! Я добавляю события в Google Календарь и напоминаю за 60 и 10 минут. Команды: /connect, /add <текст>, /tz <Europe/Moscow>. Можно писать просто: 'завтра в 11:00 встреча на 30 мин'.")
-return
-if text.startswith("/tz"):
-parts = text.split(maxsplit=1)
-if len(parts) < 2:
-send_message(chat_id, "Укажите часовой пояс, например: /tz Europe/Moscow")
-return
-tz = parts[1].strip()
-try:
-ZoneInfo(tz)
-except Exception:
-send_message(chat_id, "Неизвестный часовой пояс. Пример: Europe/Moscow")
-return
-store = load_store()
-user = get_user(store, chat_id)
-user["tz"] = tz
-save_store(store)
-send_message(chat_id, f"Часовой пояс установлен: {tz}")
-return
-if text.startswith("/connect"):
-if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and BASE_URL):
-send_message(chat_id, "Не настроен Google OAuth. Проверьте переменные GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, BASE_URL.")
-return
-client_config = {
-"web": {
-"client_id": GOOGLE_CLIENT_ID,
-"client_secret": GOOGLE_CLIENT_SECRET,
-"auth_uri": "https://accounts.google.com/o/oauth2/auth",
-"token_uri": "https://oauth2.googleapis.com/token",
-"redirect_uris": [f"{BASE_URL}/auth/callback"]
-}
-}
-flow = Flow.from_client_config(client_config, SCOPES, redirect_uri=f"{BASE_URL}/auth/callback")
-auth_url, state = flow.authorization_url(
-access_type="offline", include_granted_scopes=True, prompt="consent"
-)
-OAUTH_STATE[state] = {"chat_id": str(chat_id), "code_verifier": flow.code_verifier, "ts": time.time()}
-send_message(chat_id, f"Откройте ссылку для привязки Google: {auth_url}")
-return
-if text.startswith("/add"):
-text = text[len("/add"):].strip()
-# общий кейс: добавление события
-store = load_store()
-user = get_user(store, chat_id)
-tz = user.get("tz", DEFAULT_TZ)
-summary, start, end, err = parse_event_text(text, tz)
-if err:
-send_message(chat_id, err)
-return
-service = build_service_for_chat(chat_id)
-if not service:
-send_message(chat_id, "Сначала привяжите Google: /connect")
-return
-try:
-ev_id, link = add_event(service, summary, start, end)
-send_message(chat_id, f"Добавлено: {summary}\nНачало: {format_time(start)}\nОкончание: {format_time(end)}")
-except Exception as e:
-print("add_event error:", e)
-send_message(chat_id, "Не удалось добавить событие. Попробуйте еще раз.")
+    if text.startswith("/start"):
+        send_message(chat_id, "Привет! Я добавляю события в Google Календарь и напоминаю за 60 и 10 минут. Команды: /connect, /add <текст>, /tz <Europe/Moscow>. Можно писать просто: 'завтра в 11:00 встреча на 30 мин'.")
+        return
+    if text.startswith("/tz"):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            send_message(chat_id, "Укажите часовой пояс, например: /tz Europe/Moscow")
+            return
+        tz = parts[1].strip()
+        try:
+            ZoneInfo(tz)
+        except Exception:
+            send_message(chat_id, "Неизвестный часовой пояс. Пример: Europe/Moscow")
+            return
+        store = load_store()
+        user = get_user(store, chat_id)
+        user["tz"] = tz
+        save_store(store)
+        send_message(chat_id, f"Часовой пояс установлен: {tz}")
+        return
+    if text.startswith("/connect"):
+        if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and BASE_URL):
+            send_message(chat_id, "Не настроен Google OAuth. Проверьте переменные GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, BASE_URL.")
+            return
+        client_config = {
+            "web": {
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": [f"{BASE_URL}/auth/callback"]
+            }
+        }
+        flow = Flow.from_client_config(client_config, SCOPES, redirect_uri=f"{BASE_URL}/auth/callback")
+        auth_url, state = flow.authorization_url(
+            access_type="offline", include_granted_scopes=True, prompt="consent"
+        )
+        OAUTH_STATE[state] = {"chat_id": str(chat_id), "code_verifier": flow.code_verifier, "ts": time.time()}
+        send_message(chat_id, f"Откройте ссылку для привязки Google: {auth_url}")
+        return
+    if text.startswith("/add"):
+        text = text[len("/add"):].strip()
+        # общий кейс: добавление события
+        store = load_store()
+        user = get_user(store, chat_id)
+        tz = user.get("tz", DEFAULT_TZ)
+        summary, start, end, err = parse_event_text(text, tz)
+        if err:
+            send_message(chat_id, err)
+            return
+        service = build_service_for_chat(chat_id)
+        if not service:
+            send_message(chat_id, "Сначала привяжите Google: /connect")
+            return
+        try:
+            ev_id, link = add_event(service, summary, start, end)
+            send_message(chat_id, f"Добавлено: {summary}\nНачало: {format_time(start)}\nОкончание: {format_time(end)}")
+        except Exception as e:
+            print("add_event error:", e)
+            send_message(chat_id, "Не удалось добавить событие. Попробуйте еще раз.")
 
 def handle_voice(chat_id, voice):
-if not OPENAI_API_KEY:
-send_message(chat_id, "Для распознавания голоса нужен OPENAI_API_KEY в переменных окружения. Иначе пришлите текст.")
-return
-file_id = voice.get("file_id")
-r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile", params={"file_id": file_id})
-file_path = r.json()["result"]["file_path"]
-file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-audio = requests.get(file_url).content
-headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-files = {"file": ("audio.ogg", io.BytesIO(audio), "audio/ogg")}
-data = {"model": "gpt-4o-mini-transcribe"}
-tr = requests.post("https://api.openai.com/v1/audio/transcriptions", headers=headers, files=files, data=data, timeout=120)
-if tr.status_code != 200:
-print("Transcribe error:", tr.status_code, tr.text)
-send_message(chat_id, "Не получилось распознать голос. Пришлите текст.")
-return
-text = tr.json().get("text", "").strip()
-if not text:
-send_message(chat_id, "Пустая расшифровка. Пришлите текст.")
-return
-send_message(chat_id, f"Распознано: {text}")
-handle_text(chat_id, text)
+    if not OPENAI_API_KEY:
+        send_message(chat_id, "Для распознавания голоса нужен OPENAI_API_KEY в переменных окружения. Иначе пришлите текст.")
+        return
+    file_id = voice.get("file_id")
+    r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile", params={"file_id": file_id})
+    file_path = r.json()["result"]["file_path"]
+    file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+    audio = requests.get(file_url).content
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+    files = {"file": ("audio.ogg", io.BytesIO(audio), "audio/ogg")}
+    data = {"model": "gpt-4o-mini-transcribe"}
+    tr = requests.post("https://api.openai.com/v1/audio/transcriptions", headers=headers, files=files, data=data, timeout=120)
+    if tr.status_code != 200:
+        print("Transcribe error:", tr.status_code, tr.text)
+        send_message(chat_id, "Не получилось распознать голос. Пришлите текст.")
+        return
+    text = tr.json().get("text", "").strip()
+    if not text:
+        send_message(chat_id, "Пустая расшифровка. Пришлите текст.")
+        return
+    send_message(chat_id, f"Распознано: {text}")
+    handle_text(chat_id, text)
 
 @app.route("/", methods=["GET"])
 def index():
-return "OK", 200
+    return "OK", 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-upd = request.get_json(force=True, silent=True) or {}
-msg = upd.get("message") or {}
-chat = msg.get("chat") or {}
-chat_id = str(chat.get("id") or "")
-if not chat_id or (ALLOWED_CHAT_ID and chat_id != str(ALLOWED_CHAT_ID)):
-return jsonify(ok=True)
-if "text" in msg:
-handle_text(chat_id, msg["text"])
-elif "voice" in msg:
-handle_voice(chat_id, msg["voice"])
-else:
-send_message(chat_id, "Пришлите текст или голосовое.")
-return jsonify(ok=True)
+    upd = request.get_json(force=True, silent=True) or {}
+    msg = upd.get("message") or {}
+    chat = msg.get("chat") or {}
+    chat_id = str(chat.get("id") or "")
+    if not chat_id or (ALLOWED_CHAT_ID and chat_id != str(ALLOWED_CHAT_ID)):
+        return jsonify(ok=True)
+    if "text" in msg:
+        handle_text(chat_id, msg["text"])
+    elif "voice" in msg:
+        handle_voice(chat_id, msg["voice"])
+    else:
+        send_message(chat_id, "Пришлите текст или голосовое.")
+    return jsonify(ok=True)
 
 @app.route("/auth/callback", methods=["GET"])
 def auth_callback():
-state = request.args.get("state")
-code = request.args.get("code")
-if not state or not code or state not in OAUTH_STATE:
-return "Bad state", 400
-info = OAUTH_STATE.pop(state)
-chat_id = info["chat_id"]
-client_config = {
-"web": {
-"client_id": GOOGLE_CLIENT_ID,
-"client_secret": GOOGLE_CLIENT_SECRET,
-"auth_uri": "https://accounts.google.com/o/oauth2/auth",
-"token_uri": "https://oauth2.googleapis.com/token",
-"redirect_uris": [f"{BASE_URL}/auth/callback"]
-}
-}
-flow = Flow.from_client_config(client_config, SCOPES, redirect_uri=f"{BASE_URL}/auth/callback", state=state)
-try:
-flow.code_verifier = info["code_verifier"]
-except Exception:
-pass
-try:
-flow.fetch_token(authorization_response=request.url)
-except Exception as e:
-print("fetch_token error:", e)
-return "Auth failed", 400
-creds = flow.credentials
-store = load_store()
-user = get_user(store, chat_id)
-user["creds"] = json.loads(creds.to_json())
-save_store(store)
-send_message(chat_id, "Google подключен! Теперь можно добавлять события: например, 'сегодня в 15:00 зубной на 30 мин'.")
-return "OK, можно вернуться в Telegram", 200
+    state = request.args.get("state")
+    code = request.args.get("code")
+    if not state or not code or state not in OAUTH_STATE:
+        return "Bad state", 400
+    info = OAUTH_STATE.pop(state)
+    chat_id = info["chat_id"]
+    client_config = {
+        "web": {
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [f"{BASE_URL}/auth/callback"]
+        }
+    }
+    flow = Flow.from_client_config(client_config, SCOPES, redirect_uri=f"{BASE_URL}/auth/callback", state=state)
+    try:
+        flow.code_verifier = info["code_verifier"]
+    except Exception:
+        pass
+    try:
+        flow.fetch_token(authorization_response=request.url)
+    except Exception as e:
+        print("fetch_token error:", e)
+        return "Auth failed", 400
+    creds = flow.credentials
+    store = load_store()
+    user = get_user(store, chat_id)
+    user["creds"] = json.loads(creds.to_json())
+    save_store(store)
+    send_message(chat_id, "Google подключен! Теперь можно добавлять события: например, 'сегодня в 15:00 зубной на 30 мин'.")
+    return "OK, можно вернуться в Telegram", 200
 
 def reminder_loop():
-time.sleep(3)
-set_webhook()
-while True:
-try:
-store = load_store()
-for chat_id, user in list(store.get("users", {}).items()):
-creds_json = user.get("creds")
-if not creds_json:
-continue
-service = build_service_for_chat(chat_id)
-if not service:
-continue
-tz = ZoneInfo(user.get("tz", DEFAULT_TZ))
-now = datetime.now(tz)
-time_min = (now - timedelta(minutes=1)).astimezone(timezone.utc).isoformat()
-time_max = (now + timedelta(minutes=70)).astimezone(timezone.utc).isoformat()
-events = service.events().list(
-calendarId="primary",
-timeMin=time_min,
-timeMax=time_max,
-singleEvents=True,
-orderBy="startTime"
-).execute().get("items", [])
-rem = user.setdefault("reminders", {})
-changed = False
-for ev in events:
-start = ev.get("start", {})
-if "dateTime" not in start:
-continue  # all-day
-start_dt = dateparser.parse(start["dateTime"])
-if not start_dt:
-continue
-start_dt = start_dt.astimezone(tz)
-diff = (start_dt - now).total_seconds() / 60.0
-ev_id = ev.get("id")
-rr = rem.setdefault(ev_id, {"sent60": False, "sent10": False, "start": start_dt.isoformat(), "summary": ev.get("summary", "Событие")})
-if rr.get("start") != start_dt.isoformat():
-rr["sent60"] = False
-rr["sent10"] = False
-rr["start"] = start_dt.isoformat()
-rr["summary"] = ev.get("summary", "Событие")
-changed = True
-if not rr["sent60"] and 59 <= diff <= 61:
-send_message(chat_id, f"Напоминание: {rr['summary']} через 1 час (в {start_dt.strftime('%H:%M')})")
-rr["sent60"] = True
-changed = True
-if not rr["sent10"] and 9 <= diff <= 11:
-send_message(chat_id, f"Напоминание: {rr['summary']} через 10 минут (в {start_dt.strftime('%H:%M')})")
-rr["sent10"] = True
-changed = True
-if changed:
-save_store(store)
-except Exception as e:
-print("reminder loop error:", e)
-time.sleep(30)
+    time.sleep(3)
+    set_webhook()
+    while True:
+        try:
+            store = load_store()
+            for chat_id, user in list(store.get("users", {}).items()):
+                creds_json = user.get("creds")
+                if not creds_json:
+                    continue
+                service = build_service_for_chat(chat_id)
+                if not service:
+                    continue
+                tz = ZoneInfo(user.get("tz", DEFAULT_TZ))
+                now = datetime.now(tz)
+                time_min = (now - timedelta(minutes=1)).astimezone(timezone.utc).isoformat()
+                time_max = (now + timedelta(minutes=70)).astimezone(timezone.utc).isoformat()
+                events = service.events().list(
+                    calendarId="primary",
+                    timeMin=time_min,
+                    timeMax=time_max,
+                    singleEvents=True,
+                    orderBy="startTime"
+                ).execute().get("items", [])
+                rem = user.setdefault("reminders", {})
+                changed = False
+                for ev in events:
+                    start = ev.get("start", {})
+                    if "dateTime" not in start:
+                        continue  # all-day
+                    start_dt = dateparser.parse(start["dateTime"])
+                    if not start_dt:
+                        continue
+                    start_dt = start_dt.astimezone(tz)
+                    diff = (start_dt - now).total_seconds() / 60.0
+                    ev_id = ev.get("id")
+                    rr = rem.setdefault(ev_id, {"sent60": False, "sent10": False, "start": start_dt.isoformat(), "summary": ev.get("summary", "Событие")})
+                    if rr.get("start") != start_dt.isoformat():
+                        rr["sent60"] = False
+                        rr["sent10"] = False
+                        rr["start"] = start_dt.isoformat()
+                        rr["summary"] = ev.get("summary", "Событие")
+                        changed = True
+                    if not rr["sent60"] and 59 <= diff <= 61:
+                        send_message(chat_id, f"Напоминание: {rr['summary']} через 1 час (в {start_dt.strftime('%H:%M')})")
+                        rr["sent60"] = True
+                        changed = True
+                    if not rr["sent10"] and 9 <= diff <= 11:
+                        send_message(chat_id, f"Напоминание: {rr['summary']} через 10 минут (в {start_dt.strftime('%H:%M')})")
+                        rr["sent10"] = True
+                        changed = True
+                if changed:
+                    save_store(store)
+        except Exception as e:
+            print("reminder loop error:", e)
+        time.sleep(30)
 
-if name == "main":
-threading.Thread(target=reminder_loop, daemon=True).start()
-port = int(os.environ.get("PORT", "10000"))
-app.run(host="0.0.0.0", port=port)
+if __name__ == "__main__":
+    threading.Thread(target=reminder_loop, daemon=True).start()
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
+
+
+
 
 
 
