@@ -26,11 +26,11 @@ STORE_PATH = "store.json"
 LOCK = threading.Lock()
 OAUTH_STATE = {}  # state -> {chat_id, code_verifier, ts}
 
-def load_store():
-if not os.path.exists(STORE_PATH):
-return {"users": {}}
-with open(STORE_PATH, "r", encoding="utf-8") as f:
-return json.load(f)
+    def load_store():  
+    if not os.path.exists(STORE_PATH):
+    return {"users": {}}
+    with open(STORE_PATH, "r", encoding="utf-8") as f:
+    return json.load(f)
 
 def save_store(data):
 with LOCK:
@@ -337,4 +337,5 @@ time.sleep(30)
 if name == "main":
 threading.Thread(target=reminder_loop, daemon=True).start()
 port = int(os.environ.get("PORT", "10000"))
+
 app.run(host="0.0.0.0", port=port)
