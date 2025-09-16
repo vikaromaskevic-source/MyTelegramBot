@@ -1,4 +1,9 @@
-import os, json, threading, time, re, io
+import os
+import re
+import json
+import threading
+import time
+import io
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import requests
@@ -46,7 +51,7 @@ def get_user(store, chat_id):
 def send_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": chat_id, "text": text})
+        requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=10)
     except Exception as e:
         print("send_message error:", e)
 
@@ -83,29 +88,59 @@ def build_service_for_chat(chat_id):
     return build("calendar", "v3", credentials=creds)
 
 def parse_event_text(text, tz_str):
+    text = text.strip()
+    # Только "в NN.NN" -> "в NN:NN", но НЕ "18.09"
+    text = re.sub(r'(?i)(?<=\bв\s)(\d{1,2})\.(\d{2})\b', r'\1:\2', text)
     tz = ZoneInfo(tz_str)
-    # длительность
+
+    # длительность: полчаса, минуты, часы
     dur_minutes = None
-    m = re.search(r"\bна\s+(\d+)\s*(минут|мин|m)\b", text, re.IGNORECASE)
-    h = re.search(r"\bна\s+(\d+)\s*(час|ч|h)\b", text, re.IGNORECASE)
+    has_half = re.search(r"\bполчаса\b", text, re.IGNORECASE)
+    m = re.search(r"\bна\s*(\d+)\s*(?:минут(?:ы)?|мин\.?|мин|m)\b", text, re.IGNORECASE)
+    h = re.search(r"\bна\s*(\d+)\s*(?:час(?:а|ов)?|ч\.?|ч|h)\b", text, re.IGNORECASE)
+    if has_half:
+        dur_minutes = 30
     if m:
         dur_minutes = int(m.group(1))
     elif h:
         dur_minutes = int(h.group(1)) * 60
-    # до HH:MM
-    until = re.search(r"\bдо\s+(\d{1,2}[:.]\d{2})", text, re.IGNORECASE)
-    settings = {
-        "PREFER_DATES_FROM": "future",
-        "RETURN_AS_TIMEZONE_AWARE": True,
-        "TIMEZONE": tz_str,
-        "RELATIVE_BASE": datetime.now(tz)
-    }
-    dt = dateparser.parse(text, languages=["ru"], settings=settings)
+
+    until = re.search(r"\bдо\s+(\d{1,2}(?::|\.)\d{2})\b", text, re.IGNORECASE)
+
+    # Очищаем служебные фразы перед разбором даты/времени
+    text_for_parse = text
+    text_for_parse = re.sub(
+        r"\bна\s*(полчаса|\d+\s*(?:минут(?:ы)?|мин\.?|мин|m|час(?:а|ов)?|ч\.?|ч|h))\b",
+        "",
+        text_for_parse,
+        flags=re.IGNORECASE
+    )
+    text_for_parse = re.sub(
+        r"\bдо\s+\d{1,2}(?::|\.)\d{2}\b",
+        "",
+        text_for_parse,
+        flags=re.IGNORECASE
+    )
+    text_for_parse = re.sub(r"\s{2,}", " ", text_for_parse).strip()
+
+    dt = dateparser.parse(
+        text_for_parse,
+        languages=['ru'],
+        settings={
+            'PREFER_DATES_FROM': 'future',
+            'RELATIVE_BASE': datetime.now(ZoneInfo(tz_str)),
+            'TIMEZONE': tz_str,
+            'TO_TIMEZONE': tz_str,
+            'RETURN_AS_TIMEZONE_AWARE': True,
+        }
+    )
     if not dt:
         return None, None, None, "Не понял дату/время. Пример: 'завтра в 14:30 встреча на 30 мин'."
+
     start = dt.astimezone(tz)
+
     if until:
-        hh, mm = re.split("[:.]", until.group(1))
+        hh, mm = re.split("[:\.]", until.group(1))
         end = start.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
         if end <= start:
             end += timedelta(days=1)
@@ -113,22 +148,28 @@ def parse_event_text(text, tz_str):
         if not dur_minutes:
             dur_minutes = 60
         end = start + timedelta(minutes=dur_minutes)
-    # summary
+
     summary = text
     summary = re.sub(r"\b(сегодня|завтра|послезавтра)\b", "", summary, flags=re.I)
-    summary = re.sub(r"\bв\s+\d{1,2}[:.]\d{2}\b", "", summary, flags=re.I)
-    summary = re.sub(r"\bна\s+\d+\s*(минут|мин|m|час|ч|h)\b", "", summary, flags=re.I)
-    summary = re.sub(r"\bдо\s+\d{1,2}[:.]\d{2}\b", "", summary, flags=re.I)
-    summary = summary.strip(" ,.-")
+    summary = re.sub(r"\bв\s+\d{1,2}(?::|\.)?\d{0,2}\b", "", summary, flags=re.I)
+    summary = re.sub(
+        r"\bна\s*(полчаса|\d+\s*(?:минут(?:ы)?|мин\.?|мин|m|час(?:а|ов)?|ч\.?|ч|h))\b",
+        "",
+        summary,
+        flags=re.I
+    )
+    summary = re.sub(r"\bдо\s+\d{1,2}(?::|\.)\d{2}\b", "", summary, flags=re.I)
+    summary = re.sub(r"\s{2,}", " ", summary).strip(" ,.-")
     if not summary:
         summary = "Событие"
+
     return summary, start, end, None
 
-def add_event(service, summary, start, end):
+def add_event(service, summary, start, end, tz_str):
     body = {
         "summary": summary,
-        "start": {"dateTime": start.isoformat()},
-        "end": {"dateTime": end.isoformat()},
+        "start": {"dateTime": start.isoformat(), "timeZone": tz_str},
+        "end": {"dateTime": end.isoformat(), "timeZone": tz_str},
         "reminders": {
             "useDefault": False,
             "overrides": [{"method": "popup", "minutes": 60}, {"method": "popup", "minutes": 10}]
@@ -183,7 +224,6 @@ def handle_text(chat_id, text):
         return
     if text.startswith("/add"):
         text = text[len("/add"):].strip()
-        # общий кейс: добавление события
         store = load_store()
         user = get_user(store, chat_id)
         tz = user.get("tz", DEFAULT_TZ)
@@ -196,11 +236,31 @@ def handle_text(chat_id, text):
             send_message(chat_id, "Сначала привяжите Google: /connect")
             return
         try:
-            ev_id, link = add_event(service, summary, start, end)
+            ev_id, link = add_event(service, summary, start, end, tz)
             send_message(chat_id, f"Добавлено: {summary}\nНачало: {format_time(start)}\nОкончание: {format_time(end)}")
         except Exception as e:
             print("add_event error:", e)
             send_message(chat_id, "Не удалось добавить событие. Попробуйте еще раз.")
+        return
+
+    # ----- ФОЛБЭК на обычный текст -----
+    store = load_store()
+    user = get_user(store, chat_id)
+    tz = user.get("tz", DEFAULT_TZ)
+    summary, start, end, err = parse_event_text(text, tz)
+    if err:
+        send_message(chat_id, "Не понял. Пример: 'завтра в 14:30 встреча на 30 мин'. Или используйте /add <текст>.")
+        return
+    service = build_service_for_chat(chat_id)
+    if not service:
+        send_message(chat_id, "Сначала привяжите Google: /connect")
+        return
+    try:
+        ev_id, link = add_event(service, summary, start, end, tz)
+        send_message(chat_id, f"Добавлено: {summary}\nНачало: {format_time(start)}\nОкончание: {format_time(end)}")
+    except Exception as e:
+        print("add_event error:", e)
+        send_message(chat_id, "Не удалось добавить событие. Попробуйте еще раз.")
 
 def handle_voice(chat_id, voice):
     if not OPENAI_API_KEY:
@@ -311,8 +371,10 @@ def reminder_loop():
                     start = ev.get("start", {})
                     if "dateTime" not in start:
                         continue  # all-day
-                    start_dt = dateparser.parse(start["dateTime"])
-                    if not start_dt:
+                    try:
+                        iso = start["dateTime"].replace("Z", "+00:00")
+                        start_dt = datetime.fromisoformat(iso)
+                    except Exception:
                         continue
                     start_dt = start_dt.astimezone(tz)
                     diff = (start_dt - now).total_seconds() / 60.0
@@ -342,9 +404,3 @@ if __name__ == "__main__":
     threading.Thread(target=reminder_loop, daemon=True).start()
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
-
-
-
-
-
-
