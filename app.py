@@ -202,7 +202,7 @@ def format_time(dt):
 
 def handle_text(chat_id, text):
     if text.startswith("/start"):
-        send_message(chat_id, "Привет! Я добавляю события в Google Календарь и напоминаю за 60 и 10 минут. Команды: /connect, /add <текст>, /tz <Europe/Moscow>. Можно писать просто: 'завтра в 11:00 встреча на 30 мин'.")
+        send_message(chat_id, "Привет! Я добавляю события в Google Календарь и напоминаю за 60 и 10 минут. Команды: /connect, /add <текст>, /tz <Europe/Moscow>. Можно писать просто: 'завтра в:00 встреча на 30 мин'.")
         return
     if text.startswith("/tz"):
         parts = text.split(maxsplit=1)
@@ -237,10 +237,9 @@ def handle_text(chat_id, text):
         flow = Flow.from_client_config(client_config, SCOPES, redirect_uri=f"{BASE_URL}/auth/callback")
         auth_url, state = flow.authorization_url(
             access_type="offline",
-            include_granted_scopes="true",  # строкой!
             prompt="consent",
         )
-        OAUTH_STATE[state] = {"chat_id": str(chat_id), "code_verifier": flow.code_verifier, "ts": time.time()}
+        OAUTH_STATE[state] = {"chat_id": str(chat_id), "code_verifier": getattr(flow, "code_verifier", None), "ts": time.time()}
         send_message(chat_id, f"Откройте ссылку для привязки Google: {auth_url}")
         return
     if text.startswith("/add"):
@@ -291,20 +290,7 @@ def handle_voice(chat_id, voice):
     r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile", params={"file_id": file_id})
     file_path = r.json()["result"]["file_path"]
     file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-    audio = requests.get(file_url).content
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-    files = {"file": ("audio.ogg", io.BytesIO(audio), "audio/ogg")}
-    data = {"model": "gpt-4o-mini-transcribe"}
-    tr = requests.post("https://api.openai.com/v1/audio/transcriptions", headers=headers, files=files, data=data, timeout=120)
-    if tr.status_code != 200:
-        print("Transcribe error:", tr.status_code, tr.text)
-        send_message(chat_id, "Не получилось распознать голос. Пришлите текст.")
-        return
-    text = tr.json().get("text", "").strip()
-    if not text:
-        send_message(chat_id, "Пустая расшифровка. Пришлите текст.")
-        return
-    send_message(chat_id, f"Распознано: {text}")
+_id, f"Распознано: {text}")
     handle_text(chat_id, text)
 
 @app.route("/", methods=["GET"])
@@ -344,16 +330,27 @@ def auth_callback():
             "redirect_uris": [f"{BASE_URL}/auth/callback"]
         }
     }
-    flow = Flow.from_client_config(client_config, SCOPES, redirect_uri=f"{BASE_URL}/auth/callback", state=state)
+    flow = Flow.from_client_config(
+        client_config,
+        SCOPES,
+        redirect_uri=f"{BASE_URL}/auth/callback"
+    )
     try:
-        flow.code_verifier = info["code_verifier"]
+        flow.code_verifier = info.get("code_verifier")
     except Exception:
         pass
+    auth_response_url = request.url
+    if BASE_URL.startswith("https://") and auth_response_url.startswith("http://"):
+        auth_response_url = "https://" + auth_response_url[len("http://"):]
     try:
-        flow.fetch_token(authorization_response=request.url)
-    except Exception as e:
-        print("fetch_token error:", e)
-        return "Auth failed", 400
+        flow.fetch_token(code=code)
+    except Exception as e1:
+        print("fetch_token by code failed:", e1)
+        try:
+            flow.fetch_token(authorization_response=auth_response_url)
+        except Exception as e2:
+            print("fetch_token error (both methods failed):", e2)
+            return "Auth failed", 400
     creds = flow.credentials
     store = load_store()
     user = get_user(store, chat_id)
@@ -425,3 +422,4 @@ if __name__ == "__main__":
     threading.Thread(target=reminder_loop, daemon=True).start()
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+
