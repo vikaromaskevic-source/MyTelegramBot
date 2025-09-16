@@ -89,11 +89,8 @@ def build_service_for_chat(chat_id):
 
 def parse_event_text(text, tz_str):
     text = text.strip()
-    # Только "в NN.NN" -> "в NN:NN", но НЕ "18.09"
     text = re.sub(r'(?i)(?<=\bв\s)(\d{1,2})\.(\d{2})\b', r'\1:\2', text)
     tz = ZoneInfo(tz_str)
-
-    # длительность: полчаса, минуты, часы
     dur_minutes = None
     has_half = re.search(r"\bполчаса\b", text, re.IGNORECASE)
     m = re.search(r"\bна\s*(\d+)\s*(?:минут(?:ы)?|мин\.?|мин|m)\b", text, re.IGNORECASE)
@@ -104,22 +101,15 @@ def parse_event_text(text, tz_str):
         dur_minutes = int(m.group(1))
     elif h:
         dur_minutes = int(h.group(1)) * 60
-
     until = re.search(r"\bдо\s+(\d{1,2}(?::|\.)\d{2})\b", text, re.IGNORECASE)
-
-    # Очищаем служебные фразы перед разбором даты/времени
     text_for_parse = text
     text_for_parse = re.sub(
         r"\bна\s*(полчаса|\d+\s*(?:минут(?:ы)?|мин\.?|мин|m|час(?:а|ов)?|ч\.?|ч|h))\b",
-        "",
-        text_for_parse,
-        flags=re.IGNORECASE
+        "", text_for_parse, flags=re.IGNORECASE
     )
     text_for_parse = re.sub(
         r"\bдо\s+\d{1,2}(?::|\.)\d{2}\b",
-        "",
-        text_for_parse,
-        flags=re.IGNORECASE
+        "", text_for_parse, flags=re.IGNORECASE
     )
     text_for_parse = re.sub(r"\s{2,}", " ", text_for_parse).strip()
 
@@ -135,7 +125,6 @@ def parse_event_text(text, tz_str):
         }
     )
     if not dt:
-        # Fallback: вручную разбираем сегодня/завтра/послезавтра и время
         base = None
         if re.search(r"\bсегодня\b", text_for_parse, re.IGNORECASE):
             base = datetime.now(ZoneInfo(tz_str)).replace(second=0, microsecond=0)
@@ -143,7 +132,6 @@ def parse_event_text(text, tz_str):
             base = (datetime.now(ZoneInfo(tz_str)) + timedelta(days=1)).replace(second=0, microsecond=0)
         elif re.search(r"\bпослезавтра\b", text_for_parse, re.IGNORECASE):
             base = (datetime.now(ZoneInfo(tz_str)) + timedelta(days=2)).replace(second=0, microsecond=0)
-        # Время: в HH:MM или в HH
         hhmm = re.search(r"\bв\s*(\d{1,2})(?::|\.)?(\d{2})?\b", text, re.IGNORECASE)
         if base and hhmm:
             h = int(hhmm.group(1))
@@ -157,7 +145,6 @@ def parse_event_text(text, tz_str):
             return None, None, None, "Не понял дату/время. Пример: 'завтра в 14:30 встреча на 30 мин'."
 
     start = dt.astimezone(tz)
-
     if until:
         hh, mm = re.split(r"[:.]", until.group(1))
         end = start.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
@@ -167,42 +154,40 @@ def parse_event_text(text, tz_str):
         if not dur_minutes:
             dur_minutes = 60
         end = start + timedelta(minutes=dur_minutes)
-
     summary = text
     summary = re.sub(r"\b(сегодня|завтра|послезавтра)\b", "", summary, flags=re.I)
     summary = re.sub(r"\bв\s+\d{1,2}(?::|\.)?\d{0,2}\b", "", summary, flags=re.I)
     summary = re.sub(
         r"\bна\s*(полчаса|\d+\s*(?:минут(?:ы)?|мин\.?|мин|m|час(?:а|ов)?|ч\.?|ч|h))\b",
-        "",
-        summary,
-        flags=re.I
+        "", summary, flags=re.I
     )
     summary = re.sub(r"\bдо\s+\d{1,2}(?::|\.)\d{2}\b", "", summary, flags=re.I)
     summary = re.sub(r"\s{2,}", " ", summary).strip(" ,.-")
     if not summary:
         summary = "Событие"
-
     return summary, start, end, None
 
-def add_event(service, summary, start, end, tz_str):
-    body = {
-        "summary": summary,
-        "start": {"dateTime": start.isoformat(), "timeZone": tz_str},
-        "end": {"dateTime": end.isoformat(), "timeZone": tz_str},
-        "reminders": {
-            "useDefault": False,
-            "overrides": [{"method": "popup", "minutes": 60}, {"method": "popup", "minutes": 10}]
-        }
-    }
-    ev = service.events().insert(calendarId="primary", body=body).execute()
-    return ev.get("id"), ev.get("htmlLink")
+def handle_voice(chat_id, voice):
+    # Временно отключено по запросу (нет ключа)
+    pass
 
-def format_time(dt):
-    return dt.strftime("%d.%m %H:%M")
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    upd = request.get_json(force=True, silent=True) or {}
+    msg = upd.get("message") or {}
+    chat = msg.get("chat") or {}
+    chat_id = str(chat.get("id") or "")
+    if not chat_id or (ALLOWED_CHAT_ID and chat_id != str(ALLOWED_CHAT_ID)):
+        return jsonify(ok=True)
+    if "text" in msg:
+        handle_text(chat_id, msg["text"])
+    else:
+        send_message(chat_id, "Пришлите текст.")
+    return jsonify(ok=True)
 
 def handle_text(chat_id, text):
     if text.startswith("/start"):
-        send_message(chat_id, "Привет! Я добавляю события в Google Календарь и напоминаю за 60 и 10 минут. Команды: /connect, /add <текст>, /tz <Europe/Moscow>. Можно писать просто: 'завтра в:00 встреча на 30 мин'.")
+        send_message(chat_id, "Привет! Я добавляю события в Google Календарь и напоминаю за 60 и 10 минут. Команды: /connect, /add <текст>, /tz <Europe/Moscow>. Можно писать просто: 'завтра в 11:00 встреча на 30 мин'.")
         return
     if text.startswith("/tz"):
         parts = text.split(maxsplit=1)
@@ -263,7 +248,7 @@ def handle_text(chat_id, text):
             send_message(chat_id, "Не удалось добавить событие. Попробуйте еще раз.")
         return
 
-    # ----- ФОЛБЭК на обычный текст -----
+    # Фолбэк на обычный текст
     store = load_store()
     user = get_user(store, chat_id)
     tz = user.get("tz", DEFAULT_TZ)
@@ -282,36 +267,25 @@ def handle_text(chat_id, text):
         print("add_event error:", e)
         send_message(chat_id, "Не удалось добавить событие. Попробуйте еще раз.")
 
-def handle_voice(chat_id, voice):
-    if not OPENAI_API_KEY:
-        send_message(chat_id, "Для распознавания голоса нужен OPENAI_API_KEY в переменных окружения. Иначе пришлите текст.")
-        return
-    file_id = voice.get("file_id")
-    r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile", params={"file_id": file_id})
-    file_path = r.json()["result"]["file_path"]
-    file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-_id, f"Распознано: {text}")
-    handle_text(chat_id, text)
+def add_event(service, summary, start, end, tz_str):
+    body = {
+        "summary": summary,
+        "start": {"dateTime": start.isoformat(), "timeZone": tz_str},
+        "end": {"dateTime": end.isoformat(), "timeZone": tz_str},
+        "reminders": {
+            "useDefault": False,
+            "overrides": [{"method": "popup", "minutes": 60}, {"method": "popup", "minutes": 10}]
+        }
+    }
+    ev = service.events().insert(calendarId="primary", body=body).execute()
+    return ev.get("id"), ev.get("htmlLink")
+
+def format_time(dt):
+    return dt.strftime("%d.%m %H:%M")
 
 @app.route("/", methods=["GET"])
 def index():
     return "OK", 200
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    upd = request.get_json(force=True, silent=True) or {}
-    msg = upd.get("message") or {}
-    chat = msg.get("chat") or {}
-    chat_id = str(chat.get("id") or "")
-    if not chat_id or (ALLOWED_CHAT_ID and chat_id != str(ALLOWED_CHAT_ID)):
-        return jsonify(ok=True)
-    if "text" in msg:
-        handle_text(chat_id, msg["text"])
-    elif "voice" in msg:
-        handle_voice(chat_id, msg["voice"])
-    else:
-        send_message(chat_id, "Пришлите текст или голосовое.")
-    return jsonify(ok=True)
 
 @app.route("/auth/callback", methods=["GET"])
 def auth_callback():
@@ -422,4 +396,6 @@ if __name__ == "__main__":
     threading.Thread(target=reminder_loop, daemon=True).start()
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+
+
 
