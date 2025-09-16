@@ -144,7 +144,7 @@ def parse_event_text(text, tz_str):
         base = None
         if re.search(r"\bсегодня\b", text_for_parse, re.IGNORECASE):
             base = now.replace(second=0, microsecond=0)
-        elif re.search(r"\bзавтра\b", text_for_parse, re.IGNORECASE):
+        elif re.search(r "\bзавтра\b", text_for_parse, re.IGNORECASE):
             base = (now + timedelta(days=1)).replace(second=0, microsecond=0)
         elif re.search(r"\bпослезавтра\b", text_for_parse, re.IGNORECASE):
             base = (now + timedelta(days=2)).replace(second=0, microsecond=0)
@@ -282,6 +282,17 @@ def handle_text(chat_id, text):
         try:
             ev_id, link = add_event(service, summary, start, end, tz)
             send_message(chat_id, f"✅ Добавлено: {summary}\n🕒 {start.strftime('%d.%m %H:%M')}")
+        except HttpError as e:
+            # Обработка ошибок Google API
+            content = e.content.decode('utf-8') if isinstance(e.content, bytes) else str(e)
+            msg = content
+            try:
+                data = json.loads(content)
+                msg = data.get('error', {}).get('message', content)
+            except Exception:
+                pass
+            send_message(chat_id, f"Ошибка Google API: {msg}")
+            print("HttpError:", content)
         except Exception as e:
             print("Ошибка добавления:", e)
             send_message(chat_id, "Ошибка при добавлении события")
@@ -311,7 +322,7 @@ def add_event(service, summary, start, end, tz_str):
         if not status_code and hasattr(e, 'resp'):
             status_code = e.resp.status if e.resp else '?'
         print(f"Google API error ({status_code}): {content}")
-        raise Exception("Google API error")
+        raise  # Перебрасываем оригинальную ошибку
     except Exception as e:
         print(f"Unexpected error: {str(e)}")
         raise
@@ -446,8 +457,3 @@ if __name__ == "__main__":
     threading.Thread(target=reminder_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
-
-
-
-
