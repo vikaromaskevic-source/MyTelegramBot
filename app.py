@@ -135,12 +135,31 @@ def parse_event_text(text, tz_str):
         }
     )
     if not dt:
-        return None, None, None, "Не понял дату/время. Пример: 'завтра в 14:30 встреча на 30 мин'."
+        # Fallback: вручную разбираем сегодня/завтра/послезавтра и время
+        base = None
+        if re.search(r"\bсегодня\b", text_for_parse, re.IGNORECASE):
+            base = datetime.now(ZoneInfo(tz_str)).replace(second=0, microsecond=0)
+        elif re.search(r"\bзавтра\b", text_for_parse, re.IGNORECASE):
+            base = (datetime.now(ZoneInfo(tz_str)) + timedelta(days=1)).replace(second=0, microsecond=0)
+        elif re.search(r"\bпослезавтра\b", text_for_parse, re.IGNORECASE):
+            base = (datetime.now(ZoneInfo(tz_str)) + timedelta(days=2)).replace(second=0, microsecond=0)
+        # Время: в HH:MM или в HH
+        hhmm = re.search(r"\bв\s*(\d{1,2})(?::|\.)?(\d{2})?\b", text, re.IGNORECASE)
+        if base and hhmm:
+            h = int(hhmm.group(1))
+            m = int(hhmm.group(2) or 0)
+            try:
+                start = base.replace(hour=h, minute=m)
+            except ValueError:
+                return None, None, None, "Некорректное время."
+            dt = start
+        else:
+            return None, None, None, "Не понял дату/время. Пример: 'завтра в 14:30 встреча на 30 мин'."
 
     start = dt.astimezone(tz)
 
     if until:
-        hh, mm = re.split("[:\.]", until.group(1))
+        hh, mm = re.split(r"[:.]", until.group(1))
         end = start.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
         if end <= start:
             end += timedelta(days=1)
