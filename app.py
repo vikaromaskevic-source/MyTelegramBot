@@ -236,7 +236,9 @@ def handle_text(chat_id, text):
         }
         flow = Flow.from_client_config(client_config, SCOPES, redirect_uri=f"{BASE_URL}/auth/callback")
         auth_url, state = flow.authorization_url(
-            access_type="offline", include_granted_scopes=True, prompt="consent"
+            access_type="offline",
+            include_granted_scopes="true",  # строкой!
+            prompt="consent",
         )
         OAUTH_STATE[state] = {"chat_id": str(chat_id), "code_verifier": flow.code_verifier, "ts": time.time()}
         send_message(chat_id, f"Откройте ссылку для привязки Google: {auth_url}")
