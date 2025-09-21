@@ -1,8 +1,5 @@
-flask==3.0.0
-requests==2.32.3
-google-api-python-client==2.132.0
-google-auth==2.33.0
-google-auth-oauthlib==1.2.0
-dateparser==1.2.0
-pytz==2024.1
-tzdata>=2024.1
+python-telegram-bot==20.6
+google-api-python-client==2.100.0
+google-auth==2.23.2
+google-auth-oauthlib==1.1.0
+google-auth-httplib2==0.2.0
